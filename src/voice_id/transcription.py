@@ -1,201 +1,96 @@
 from __future__ import annotations
 
-import json
 import sys
-import wave
 from pathlib import Path
 
-from vosk import KaldiRecognizer
-from vosk import Model
+from faster_whisper import WhisperModel
 
 
-MODEL_NAME = "vosk-model-small-en-us-0.15"
-MODEL_LANGUAGE = "en-us"
+MODEL_SIZE = "small"
 
 
 class VoskUnavailableError(RuntimeError):
-    """Raised when the Vosk model is unavailable or fails to load."""
+    """Raised when the local ASR model is unavailable or fails to load.
+
+    Kept under the original Vosk name so the app's existing
+    error handler (which returns HTTP 503 for this) keeps
+    working unchanged.
+    """
 
     pass
 
 
-def _locate_model_path() -> Path:
-    """
-    Find the model by searching upward from this file for a
-    'models' folder containing MODEL_NAME.
+def load_client() -> WhisperModel:
 
-    Works regardless of which directory the app is launched from.
-
-    To pin a fixed location instead, replace the search with a
-    direct return, e.g.:
-
-        return Path(
-            "/home/elevone/Projects/voice-id/models"
-        ) / MODEL_NAME
-    """
-    current = Path(
-        __file__
-    ).resolve().parent
-
-    while True:
-        candidate = current / "models" / MODEL_NAME
-
-        if candidate.is_dir():
-            return candidate
-
-        if current == current.parent:
-            break
-
-        current = current.parent
-
-    raise VoskUnavailableError(
-        f"Vosk model '{MODEL_NAME}' not found. "
-        "Expected a 'models' folder above the source code, e.g. "
-        "'<project-root>/models/vosk-model-small-en-us-0.15'. "
-        "Download it from https://alphacephei.com/vosk/models, "
-        "or edit _locate_model_path() in this file to point "
-        "directly at the model."
-    )
-
-
-def load_client() -> Model:
-
-    model_path = _locate_model_path()
-
-    print("Loading Vosk model...")
+    print("Loading Whisper model...")
 
     try:
-        model = Model(
-            str(model_path)
+        model = WhisperModel(
+            MODEL_SIZE,
+            device="cpu",
+            compute_type="int8",
         )
 
     except Exception as exc:
         raise VoskUnavailableError(
-            "Vosk model failed to load. "
+            "Local ASR model failed to load. "
             "Please try the transcription again."
         ) from exc
 
-    print("Vosk model loaded successfully.")
+    print("Whisper model loaded successfully.")
 
     return model
 
 
 def upload_audio(
-    model: Model,
+    model: WhisperModel,
     audio_path: Path,
-):
+) -> Path:
+
     if not audio_path.exists():
         raise FileNotFoundError(
             f"Audio file not found: {audio_path}"
         )
 
-    print("Loading audio for Vosk...")
+    print("Audio ready.")
 
-    try:
-        audio_file = wave.open(
-            str(audio_path),
-            "rb",
-        )
-
-    except wave.Error as exc:
-        raise RuntimeError(
-            "Vosk requires 16-bit PCM WAV audio. "
-            "Convert the file first, e.g. with ffmpeg."
-        ) from exc
-
-    print("Audio loaded successfully.")
-
-    return audio_file
-
-
-def _parse_segment(
-    result: dict,
-):
-
-    text = str(
-        result.get("text", "")
-    ).strip()
-
-    if not text:
-        return None
-
-    words = result.get(
-        "result"
-    ) or []
-
-    if words:
-        start = float(
-            words[0]["start"]
-        )
-
-        end = float(
-            words[-1]["end"]
-        )
-
-    else:
-        start = 0.0
-        end = 0.0
-
-    return {
-        "start": start,
-        "end": end,
-        "text": text,
-    }
+    return audio_path
 
 
 def transcribe_audio(
-    model: Model,
-    audio_file,
+    model: WhisperModel,
+    audio_file: Path,
 ) -> dict:
 
-    recognizer = KaldiRecognizer(
-        model,
-        audio_file.getframerate(),
+    segments_iter, info = model.transcribe(
+        str(audio_file),
+        vad_filter=True,
+        beam_size=5,
     )
-
-    recognizer.SetWords(True)
 
     segments = []
 
-    try:
-        while True:
-            data = audio_file.readframes(
-                4000
-            )
+    for segment in segments_iter:
 
-            if len(data) == 0:
-                break
+        text = segment.text.strip()
 
-            if recognizer.AcceptWaveform(
-                data
-            ):
-                segment = _parse_segment(
-                    json.loads(
-                        recognizer.Result()
-                    )
-                )
+        if not text:
+            continue
 
-                if segment:
-                    segments.append(
-                        segment
-                    )
-
-        segment = _parse_segment(
-            json.loads(
-                recognizer.FinalResult()
-            )
+        segments.append(
+            {
+                "start": float(
+                    segment.start
+                ),
+                "end": float(
+                    segment.end
+                ),
+                "text": text,
+            }
         )
 
-        if segment:
-            segments.append(
-                segment
-            )
-
-    finally:
-        audio_file.close()
-
     return {
-        "language": MODEL_LANGUAGE,
+        "language": info.language,
         "segments": segments,
     }
 
@@ -358,7 +253,7 @@ def main() -> None:
     print("=" * 70)
 
     print(
-        f"Model: {MODEL_NAME}"
+        f"Model: whisper-{MODEL_SIZE}"
     )
 
     print(
