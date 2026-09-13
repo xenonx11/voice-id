@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import wave
 from pathlib import Path
 
-from dotenv import load_dotenv
 from vosk import KaldiRecognizer
 from vosk import Model
 
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_LANGUAGE = "en-us"
-DEFAULT_MODELS_DIR = "models"
 
 
 class VoskUnavailableError(RuntimeError):
@@ -22,24 +19,48 @@ class VoskUnavailableError(RuntimeError):
     pass
 
 
-def load_client() -> Model:
-    load_dotenv()
+def _locate_model_path() -> Path:
+    """
+    Find the model by searching upward from this file for a
+    'models' folder containing MODEL_NAME.
 
-    models_dir = Path(
-        os.getenv(
-            "VOSK_MODELS_DIR",
-            DEFAULT_MODELS_DIR,
-        )
+    Works regardless of which directory the app is launched from.
+
+    To pin a fixed location instead, replace the search with a
+    direct return, e.g.:
+
+        return Path(
+            "/home/elevone/Projects/voice-id/models"
+        ) / MODEL_NAME
+    """
+    current = Path(
+        __file__
+    ).resolve().parent
+
+    while True:
+        candidate = current / "models" / MODEL_NAME
+
+        if candidate.is_dir():
+            return candidate
+
+        if current == current.parent:
+            break
+
+        current = current.parent
+
+    raise VoskUnavailableError(
+        f"Vosk model '{MODEL_NAME}' not found. "
+        "Expected a 'models' folder above the source code, e.g. "
+        "'<project-root>/models/vosk-model-small-en-us-0.15'. "
+        "Download it from https://alphacephei.com/vosk/models, "
+        "or edit _locate_model_path() in this file to point "
+        "directly at the model."
     )
 
-    model_path = models_dir / MODEL_NAME
 
-    if not model_path.exists():
-        raise VoskUnavailableError(
-            f"Vosk model not found at: {model_path}. "
-            "Download it from https://alphacephei.com/vosk/models "
-            "or set VOSK_MODELS_DIR in your .env file."
-        )
+def load_client() -> Model:
+
+    model_path = _locate_model_path()
 
     print("Loading Vosk model...")
 
