@@ -3,41 +3,64 @@ from __future__ import annotations
 import json
 import os
 import sys
+import wave
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import errors
-from google.genai import types
+from vosk import KaldiRecognizer
+from vosk import Model
 
 
-MODEL_NAME = "gemini-3.5-flash"
+MODEL_NAME = "vosk-model-small-en-us-0.15"
+MODEL_LANGUAGE = "en-us"
+DEFAULT_MODELS_DIR = "models"
 
 
-class GeminiUnavailableError(RuntimeError):
-    """Raised when Gemini is temporarily unavailable."""
+class VoskUnavailableError(RuntimeError):
+    """Raised when the Vosk model is unavailable or fails to load."""
 
     pass
 
 
-def load_client() -> genai.Client:
+def load_client() -> Model:
     load_dotenv()
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    models_dir = Path(
+        os.getenv(
+            "VOSK_MODELS_DIR",
+            DEFAULT_MODELS_DIR,
+        )
+    )
 
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not set. "
-            "Add it to your .env file."
+    model_path = models_dir / MODEL_NAME
+
+    if not model_path.exists():
+        raise VoskUnavailableError(
+            f"Vosk model not found at: {model_path}. "
+            "Download it from https://alphacephei.com/vosk/models "
+            "or set VOSK_MODELS_DIR in your .env file."
         )
 
-    return genai.Client(
-        api_key=api_key
-    )
+    print("Loading Vosk model...")
+
+    try:
+        model = Model(
+            str(model_path)
+        )
+
+    except Exception as exc:
+        raise VoskUnavailableError(
+            "Vosk model failed to load. "
+            "Please try the transcription again."
+        ) from exc
+
+    print("Vosk model loaded successfully.")
+
+    return model
 
 
 def upload_audio(
-    client: genai.Client,
+    model: Model,
     audio_path: Path,
 ):
     if not audio_path.exists():
@@ -45,125 +68,115 @@ def upload_audio(
             f"Audio file not found: {audio_path}"
         )
 
-    print("Uploading audio to Gemini...")
+    print("Loading audio for Vosk...")
 
-    audio_file = client.files.upload(
-        file=str(audio_path),
-    )
+    try:
+        audio_file = wave.open(
+            str(audio_path),
+            "rb",
+        )
 
-    print("Audio uploaded successfully.")
+    except wave.Error as exc:
+        raise RuntimeError(
+            "Vosk requires 16-bit PCM WAV audio. "
+            "Convert the file first, e.g. with ffmpeg."
+        ) from exc
+
+    print("Audio loaded successfully.")
 
     return audio_file
 
 
+def _parse_segment(
+    result: dict,
+):
+
+    text = str(
+        result.get("text", "")
+    ).strip()
+
+    if not text:
+        return None
+
+    words = result.get(
+        "result"
+    ) or []
+
+    if words:
+        start = float(
+            words[0]["start"]
+        )
+
+        end = float(
+            words[-1]["end"]
+        )
+
+    else:
+        start = 0.0
+        end = 0.0
+
+    return {
+        "start": start,
+        "end": end,
+        "text": text,
+    }
+
+
 def transcribe_audio(
-    client: genai.Client,
+    model: Model,
     audio_file,
 ) -> dict:
 
-    prompt = """
-Transcribe this audio accurately.
+    recognizer = KaldiRecognizer(
+        model,
+        audio_file.getframerate(),
+    )
 
-Return ONLY valid JSON.
+    recognizer.SetWords(True)
 
-Use exactly this structure:
-
-{
-  "language": "detected language",
-  "segments": [
-    {
-      "start": 0.0,
-      "end": 0.0,
-      "text": "spoken text"
-    }
-  ]
-}
-
-Rules:
-
-1. Transcribe only speech that is actually present in the audio.
-2. Do not invent or infer missing words.
-3. Preserve the spoken wording as accurately as possible.
-4. Use seconds for timestamps.
-5. Each segment must contain a start and end timestamp.
-6. Keep timestamps in chronological order.
-7. Do not assign speaker names.
-8. Do not add explanations outside the JSON.
-"""
+    segments = []
 
     try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[
-                audio_file,
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
-        )
-
-    except errors.ServerError as exc:
-        if exc.code == 503:
-            raise GeminiUnavailableError(
-                "Gemini is temporarily unavailable. "
-                "Please try the analysis again."
-            ) from exc
-
-        raise RuntimeError(
-            f"Gemini server error: {exc}"
-        ) from exc
-
-    except errors.APIError as exc:
-        raise RuntimeError(
-            f"Gemini API error: {exc}"
-        ) from exc
-
-    if not response.text:
-        raise RuntimeError(
-            "Gemini returned an empty transcription response."
-        )
-
-    response_text = response.text.strip()
-
-    try:
-        result = json.loads(response_text)
-
-    except json.JSONDecodeError:
-
-        if response_text.startswith("```"):
-            lines = response_text.splitlines()
-
-            if (
-                len(lines) >= 3
-                and lines[0].startswith("```")
-                and lines[-1].strip() == "```"
-            ):
-                response_text = "\n".join(
-                    lines[1:-1]
-                ).strip()
-
-                try:
-                    result = json.loads(
-                        response_text
-                    )
-
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError(
-                        "Gemini returned malformed JSON."
-                    ) from exc
-
-            else:
-                raise RuntimeError(
-                    "Gemini returned malformed JSON."
-                )
-
-        else:
-            raise RuntimeError(
-                "Gemini returned malformed JSON."
+        while True:
+            data = audio_file.readframes(
+                4000
             )
 
-    return result
+            if len(data) == 0:
+                break
+
+            if recognizer.AcceptWaveform(
+                data
+            ):
+                segment = _parse_segment(
+                    json.loads(
+                        recognizer.Result()
+                    )
+                )
+
+                if segment:
+                    segments.append(
+                        segment
+                    )
+
+        segment = _parse_segment(
+            json.loads(
+                recognizer.FinalResult()
+            )
+        )
+
+        if segment:
+            segments.append(
+                segment
+            )
+
+    finally:
+        audio_file.close()
+
+    return {
+        "language": MODEL_LANGUAGE,
+        "segments": segments,
+    }
 
 
 def validate_transcript(
@@ -359,7 +372,7 @@ def main() -> None:
         print("DONE")
         print("=" * 70)
 
-    except GeminiUnavailableError as exc:
+    except VoskUnavailableError as exc:
         print()
         print("=" * 70)
         print("TRANSCRIPTION UNAVAILABLE")

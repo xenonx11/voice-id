@@ -6,12 +6,17 @@ FROM python:3.12-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        curl \
+        unzip \
         ffmpeg \
         libsndfile1 \
         libgomp1 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p models \
+    && curl -L https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -o /tmp/model.zip \
+    && unzip /tmp/model.zip -d models/ && rm /tmp/model.zip
 
 # --------------------------------------------------------------------------
 # Environment
@@ -67,14 +72,14 @@ COPY pyproject.toml README.md ./
 RUN uv pip install \
         --python /app/.venv/bin/python \
         "flask>=3.1.3" \
-        "google-genai>=2.18.1" \
         "matplotlib>=3.11.1" \
         "numpy>=2.5.2" \
         "python-dotenv>=1.2.3" \
         "scikit-learn>=1.9.0" \
         "sounddevice>=0.5.5" \
         "soundfile>=0.14.0" \
-        "speechbrain>=1.1.0"
+        "speechbrain>=1.1.0" \
+        "vosk>=0.3.45"
 
 
 # --------------------------------------------------------------------------
